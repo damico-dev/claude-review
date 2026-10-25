@@ -6,6 +6,7 @@ import Anthropic, { toFile } from "@anthropic-ai/sdk";
 import { Octokit } from "@octokit/rest";
 import { readFileSync } from "node:fs";
 import { AGENT_NAME, ENVIRONMENT_NAME, REVIEW_OUTPUT_PATH, VAULT_NAME } from "./agent.ts";
+import { isCommentable, parseDiffLines } from "./diff.ts";
 import { findAgent, findEnvironment, findVault } from "./lookup.ts";
 
 const SESSION_DEADLINE_MS = 25 * 60 * 1000;
@@ -358,18 +359,28 @@ const effortLine = effort?.level
   : "";
 const followUpLine = followUp ? `\n\n_Follow-up review of the commits since ${followUp.since.slice(0, 7)}._` : "";
 const summary = riskLine + review.summary + (tally ? `\n\nVerdicts: ${tally}.` : "") + followUpLine + effortLine;
-const listed = comments
-  .map((c) => `- \`${c.path}:${c.line}\` ${c.body.replace(/\n/g, "\n  ")}`)
-  .join("\n");
+const listFindings = (list: typeof comments) =>
+  list.map((c) => `- \`${c.path}:${c.line}\` ${c.body.replace(/\n/g, "\n  ")}`).join("\n");
+
+// GitHub rejects the whole review (422) if any comment points outside the diff,
+// so move those findings to the body up front and keep the rest inline.
+const diffLines = parseDiffLines(diffText);
+const inline = comments.filter((c) => isCommentable(diffLines, c.path, c.line, c.start_line));
+const outside = comments.filter((c) => !inline.includes(c));
+if (outside.length) console.log(`${outside.length} findings point outside the diff; posting them in the review body.`);
+const outsideList = outside.length ? `\n\n**Findings outside the diff:**\n\n${listFindings(outside)}` : "";
 
 const params = { owner, repo, pull_number: pr.number, commit_id: pr.head.sha, event: "COMMENT" as const };
+let posted = inline.length;
 try {
-  await octokit.pulls.createReview({ ...params, body: summary + footer, comments });
+  await octokit.pulls.createReview({ ...params, body: summary + outsideList + footer, comments: inline });
 } catch (err) {
-  // GitHub rejects the whole review (422) if any comment points outside the
-  // diff. Fall back to putting every finding in the review body.
+  // The check above should leave nothing for GitHub to reject, but if it
+  // still does, fall back to putting every finding in the review body.
   if ((err as { status?: number }).status !== 422) throw err;
   console.log(`Inline review rejected (${err}); posting findings in the review body.`);
+  const listed = listFindings(comments);
   await octokit.pulls.createReview({ ...params, body: summary + (listed ? `\n\n${listed}` : "") + footer });
+  posted = 0;
 }
-console.log(`Posted review with ${comments.length} inline comments.`);
+console.log(`Posted review with ${posted} inline comments.`);
