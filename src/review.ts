@@ -452,3 +452,8 @@ try {
   posted = 0;
 }
 console.log(`Posted review with ${posted} inline comments.`);
+
+if (merge?.verdict === "after_fixes" || merge?.verdict === "no") {
+  console.log(`::error::Not good to merge (${MERGE_LABELS[merge.verdict]}): ${merge.reason ?? "see the review"}`);
+  process.exitCode = 1;
+}

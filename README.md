@@ -70,6 +70,10 @@ doesn't trigger other workflows, so `pull_request_review` workflows won't run on
   member, or a collaborator. Drafts are skipped.
 - On any PR when someone adds the `claude-review` label. Remove and re-add it for a fresh review.
 
+When the review's call is "After fixes" or "No", the job fails, so the PR shows a failing check on
+the reviewed commit. Pushes don't re-run the review, so a new commit has no review check until
+someone re-adds the label.
+
 ## Options
 
 ```yaml
