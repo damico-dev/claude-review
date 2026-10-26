@@ -4,7 +4,7 @@
 
 import Anthropic, { toFile } from "@anthropic-ai/sdk";
 import { Octokit } from "@octokit/rest";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { AGENT_NAME, ENVIRONMENT_NAME, REVIEW_OUTPUT_PATH, VAULT_NAME } from "./agent.ts";
 import { isCommentable, parseDiffLines } from "./diff.ts";
 import { findAgent, findEnvironment, findVault } from "./lookup.ts";
@@ -59,6 +59,25 @@ const octokit = new Octokit({ auth: env("GITHUB_TOKEN") });
 // Uses ANTHROPIC_API_KEY when set, otherwise Workload Identity Federation via the
 // ANTHROPIC_FEDERATION_* variables and the GitHub OIDC token file.
 const client = new Anthropic();
+
+// GitHub's identity tokens expire within minutes, and the SDK re-reads this file
+// each time its Anthropic token runs out, so a long review needs it kept fresh.
+const identityTokenFile = process.env.ANTHROPIC_IDENTITY_TOKEN_FILE;
+const idTokenUrl = process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+const idTokenRequestToken = process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
+if (identityTokenFile && idTokenUrl && idTokenRequestToken) {
+  const refresh = async () => {
+    const resp = await fetch(`${idTokenUrl}&audience=https://api.anthropic.com`, {
+      headers: { Authorization: `Bearer ${idTokenRequestToken}` },
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const { value } = (await resp.json()) as { value: string };
+    writeFileSync(identityTokenFile, value);
+  };
+  setInterval(() => {
+    refresh().catch((err) => console.log(`Could not refresh the GitHub identity token: ${err}`));
+  }, 2 * 60 * 1000).unref();
+}
 
 // --- Gather the PR's diff and pick the commit to clone -----------------------
 
