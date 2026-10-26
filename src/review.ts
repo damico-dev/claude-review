@@ -262,13 +262,13 @@ console.log(`Watch it live: https://platform.claude.com/workspaces/${workspaceId
 // --- Run it to completion -----------------------------------------------------
 
 // Open the stream before sending the message so no events are missed.
-const stream = await client.beta.sessions.events.stream(session.id);
+let stream = await client.beta.sessions.events.stream(session.id);
 await client.beta.sessions.events.send(session.id, {
   events: [{ type: "user.message", content: [{ type: "text", text: message }] }],
 });
 
 let lastAgentText = "";
-let stopReason = "unknown";
+let stopReason: string | undefined;
 const deadline = setTimeout(() => {
   console.log("Session ran past the deadline, interrupting it.");
   client.beta.sessions.events
@@ -276,38 +276,70 @@ const deadline = setTimeout(() => {
     .catch((err) => console.log(`Interrupt failed: ${err}`));
 }, SESSION_DEADLINE_MS);
 
-for await (const ev of stream) {
-  if (ev.type === "agent.message") {
-    const text = ev.content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("");
-    if (text) {
-      lastAgentText = text;
-      console.log(`[agent] ${text}`);
+// The status the session settled in, or undefined while it is still working.
+async function settledStopReason(): Promise<string | undefined> {
+  const { status } = await client.beta.sessions.retrieve(session.id);
+  if (status === "terminated") return "terminated";
+  if (status !== "idle") return undefined;
+  for await (const ev of client.beta.sessions.events.list(session.id, {
+    types: ["session.status_idle"],
+    order: "desc",
+  })) {
+    if (ev.type === "session.status_idle" && ev.stop_reason.type !== "requires_action") {
+      return ev.stop_reason.type;
     }
-  } else if (ev.type === "agent.tool_use") {
-    console.log(`[tool] ${ev.name}`);
-    if (ev.evaluated_permission === "ask") {
-      // Shouldn't happen with always_allow, but nobody is around to approve.
-      await client.beta.sessions.events.send(session.id, {
-        events: [
-          {
-            type: "user.tool_confirmation",
-            tool_use_id: ev.id,
-            result: "deny",
-            deny_message: "This run is unattended; continue without this tool call.",
-          },
-        ],
-      });
-    }
-  } else if (ev.type === "session.error") {
-    console.log(`[session error] ${JSON.stringify(ev)}`);
-  } else if (ev.type === "session.status_idle") {
-    if (ev.stop_reason.type === "requires_action") continue;
-    stopReason = ev.stop_reason.type;
-    break;
-  } else if (ev.type === "session.status_terminated") {
-    stopReason = "terminated";
     break;
   }
+  return undefined;
+}
+
+// The stream can drop while a long tool call sends no events, so reconnect until
+// the session settles.
+while (stopReason === undefined) {
+  try {
+    for await (const ev of stream) {
+      if (ev.type === "agent.message") {
+        const text = ev.content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("");
+        if (text) {
+          lastAgentText = text;
+          console.log(`[agent] ${text}`);
+        }
+      } else if (ev.type === "agent.tool_use") {
+        console.log(`[tool] ${ev.name}`);
+        if (ev.evaluated_permission === "ask") {
+          // Shouldn't happen with always_allow, but nobody is around to approve.
+          await client.beta.sessions.events.send(session.id, {
+            events: [
+              {
+                type: "user.tool_confirmation",
+                tool_use_id: ev.id,
+                result: "deny",
+                deny_message: "This run is unattended; continue without this tool call.",
+              },
+            ],
+          });
+        }
+      } else if (ev.type === "session.error") {
+        console.log(`[session error] ${JSON.stringify(ev)}`);
+      } else if (ev.type === "session.status_idle") {
+        if (ev.stop_reason.type === "requires_action") continue;
+        stopReason = ev.stop_reason.type;
+        break;
+      } else if (ev.type === "session.status_terminated") {
+        stopReason = "terminated";
+        break;
+      }
+    }
+  } catch (err) {
+    console.log(`Event stream failed: ${err}`);
+  }
+  if (stopReason !== undefined) break;
+  console.log("Event stream closed, reconnecting.");
+  await new Promise((resolve) => setTimeout(resolve, 5000));
+  // Open the new stream before checking the status, so a stop in between isn't missed.
+  stream = await client.beta.sessions.events.stream(session.id);
+  stopReason = await settledStopReason();
+  if (stopReason !== undefined) stream.controller.abort();
 }
 clearTimeout(deadline);
 console.log(`Session stopped: ${stopReason}`);
@@ -339,7 +371,12 @@ try {
 }
 if (!review) {
   review = {
-    summary: lastAgentText || `The review session ended (${stopReason}) without producing a review.`,
+    summary: [
+      `The review session ended (${stopReason}) without producing a review.`,
+      lastAgentText && `Its last message:\n\n> ${lastAgentText.replace(/\n/g, "\n> ")}`,
+    ]
+      .filter(Boolean)
+      .join("\n\n"),
     comments: [],
   };
 }
