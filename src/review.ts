@@ -22,9 +22,17 @@ type ReviewComment = {
   verdict_reason?: string;
 };
 type Rating = { level?: string; reason?: string };
-type Review = { summary: string; review_effort?: Rating; risk?: Rating; comments: ReviewComment[] };
+type MergeCall = { verdict?: string; reason?: string };
+type Review = {
+  summary: string;
+  review_effort?: Rating;
+  risk?: Rating;
+  merge?: MergeCall;
+  comments: ReviewComment[];
+};
 
 const RISK_LABELS: Record<string, string> = { low: "Low", medium: "Medium", high: "High" };
+const MERGE_LABELS: Record<string, string> = { yes: "Yes", after_fixes: "After fixes", no: "No" };
 const VERDICT_LABELS: Record<string, string> = {
   valid: "Valid",
   unlikely: "Unlikely",
@@ -351,14 +359,18 @@ const tally = Object.entries(VERDICT_LABELS)
   .join(", ");
 const risk = review.risk;
 const riskLine = risk?.level
-  ? `**Merge risk: ${RISK_LABELS[risk.level] ?? risk.level}.** ${risk.reason ?? ""}`.trimEnd() + "\n\n"
+  ? `**Change risk: ${RISK_LABELS[risk.level] ?? risk.level}.** ${risk.reason ?? ""}`.trimEnd() + "\n\n"
+  : "";
+const merge = review.merge;
+const mergeLine = merge?.verdict
+  ? `**Good to merge: ${MERGE_LABELS[merge.verdict] ?? merge.verdict}.** ${merge.reason ?? ""}`.trimEnd() + "\n\n"
   : "";
 const effort = review.review_effort;
 const effortLine = effort?.level
   ? `\n\n_Reviewed at ${effort.level} effort.${effort.reason ? ` ${effort.reason}` : ""}_`
   : "";
 const followUpLine = followUp ? `\n\n_Follow-up review of the commits since ${followUp.since.slice(0, 7)}._` : "";
-const summary = riskLine + review.summary + (tally ? `\n\nVerdicts: ${tally}.` : "") + followUpLine + effortLine;
+const summary = mergeLine + riskLine + review.summary + (tally ? `\n\nVerdicts: ${tally}.` : "") + followUpLine + effortLine;
 const listFindings = (list: typeof comments) =>
   list.map((c) => `- \`${c.path}:${c.line}\` ${c.body.replace(/\n/g, "\n  ")}`).join("\n");
 

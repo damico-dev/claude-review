@@ -22,16 +22,17 @@ is that relay: no server to host, and it gets a GitHub token for free.
 3. In its sandbox, the agent applies the diff on top of the merge base, installs Claude Code, and
    runs the bundled `/code-review` at low, medium, or high effort, which it picks from a quick read
    of the diff by size, complexity, and potential impact. It then checks each finding against the code
-   (valid, unlikely, not worth fixing, or incorrect, with the reason) and rates the risk of merging
-   (low, medium, or high, by what the change could break). It writes all of that to
+   (valid, unlikely, not worth fixing, or incorrect, with the reason), rates the change risk (low,
+   medium, or high, by what the change could break), and decides whether the PR is good to merge
+   (yes, after fixes, or no, from the valid findings). It writes all of that to
    `/mnt/session/outputs/review.json`, one inline comment per finding tied to a changed line.
-4. The script downloads that file and posts one `COMMENT` review: the merge risk and a count of
-   verdicts in the summary, and each finding's verdict in its inline comment. It never approves or
-   requests changes.
+4. The script downloads that file and posts one `COMMENT` review: the merge call, the change risk
+   and a count of verdicts in the summary, and each finding's verdict in its inline comment. It never
+   approves or requests changes.
 
 When the PR has been reviewed before, the next review is a follow-up: the agent reviews only the
 commits since its last review, with the whole PR in the working tree for context, reports which
-earlier findings are fixed or still open, and updates its risk rating. If the PR was rebased or the
+earlier findings are fixed or still open, and updates its risk rating and merge call. If the PR was rebased or the
 base branch was merged in since, the new commits can't be separated cleanly, so it reviews the
 whole PR again, still with the last review in hand.
 
