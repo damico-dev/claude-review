@@ -4,7 +4,10 @@
 
 import Anthropic, { toFile } from "@anthropic-ai/sdk";
 import { Octokit } from "@octokit/rest";
-import { readFileSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { AGENT_NAME, ENVIRONMENT_NAME, REVIEW_OUTPUT_PATH, VAULT_NAME } from "./agent.ts";
 import { isCommentable, parseDiffLines } from "./diff.ts";
 import { findAgent, findEnvironment, findVault } from "./lookup.ts";
@@ -81,14 +84,6 @@ if (identityTokenFile && idTokenUrl && idTokenRequestToken) {
 
 // --- Gather the PR's diff and pick the commit to clone -----------------------
 
-const { data: diff } = await octokit.pulls.get({
-  owner,
-  repo,
-  pull_number: pr.number,
-  mediaType: { format: "diff" },
-});
-const diffText = diff as unknown as string;
-
 // Clone the merge base and have the agent apply the diff on top, so the PR's
 // changes are the working tree's uncommitted diff, which is what /code-review
 // reviews. The merge base is always in the base repo, fork PRs included.
@@ -103,6 +98,41 @@ try {
   checkoutSha = data.merge_base_commit.sha;
 } catch (err) {
   console.log(`Could not find the merge base, cloning the base branch tip instead: ${err}`);
+}
+
+// GitHub won't serve a PR diff over 20,000 lines, so build those with git.
+function gitDiff(base: string, head: string): string {
+  const dir = mkdtempSync(join(tmpdir(), "pr-diff-"));
+  const git = (...args: string[]) =>
+    execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", maxBuffer: 1 << 30 });
+  const auth = Buffer.from(`x-access-token:${env("GITHUB_TOKEN")}`).toString("base64");
+  git("init", "-q");
+  git(
+    "-c",
+    `http.extraheader=AUTHORIZATION: basic ${auth}`,
+    "fetch",
+    "-q",
+    "--depth=1",
+    `${process.env.GITHUB_SERVER_URL ?? "https://github.com"}/${owner}/${repo}`,
+    base,
+    head,
+  );
+  return git("diff", "--no-color", "--no-ext-diff", base, head);
+}
+
+let diffText: string;
+try {
+  const { data } = await octokit.pulls.get({
+    owner,
+    repo,
+    pull_number: pr.number,
+    mediaType: { format: "diff" },
+  });
+  diffText = data as unknown as string;
+} catch (err) {
+  if ((err as { status?: number }).status !== 406) throw err;
+  console.log("The PR diff is too large for the GitHub API; building it with git.");
+  diffText = gitDiff(checkoutSha, pr.head.sha);
 }
 
 // --- Look for this bot's last review on the PR ----------------------------------
